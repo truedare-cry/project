@@ -1,0 +1,89 @@
+# ======================================================================
+# run5_sim.do — Nhập chuỗi tùy ý từ ModelSim, xem dạng sóng hash
+#
+# CÁCH DÙNG:
+#   Sửa 2 dòng STR và VARIANT bên dưới rồi gõ: do run5_sim.do
+#
+# Ví dụ:
+#   set INPUT_STR  "ilovehcmus##"
+#   set INPUT_VAR  256
+# ======================================================================
+
+quit -sim
+if {[file exists work]} { vdel -all }
+vlib work
+
+# ---- Compile ----
+vlog -nolock sha3.v
+vlog -nolock sha3_bank.v
+vlog -nolock tb5_sha3_input.v
+
+# ======================================================================
+# *** THAY ĐỔI CHUỖI VÀ VARIANT TẠI ĐÂY ***
+# ======================================================================
+set INPUT_STR  "ilovehcmus##"
+set INPUT_VAR  256
+# ======================================================================
+
+# Khởi động simulation với plusargs
+vsim work.tb5_sha3_input \
+    -Lf 220model -Lf altera_mf_ver -Lf verilog \
+    "+STR=$INPUT_STR" \
+    "+VARIANT=$INPUT_VAR"
+
+# ======================================================================
+# WAVE: Clock / Reset
+# ======================================================================
+add wave -divider "--- Clock / Reset ---"
+add wave                  /tb5_sha3_input/tb_clk
+add wave                  /tb5_sha3_input/tb_rst_n
+
+# ======================================================================
+# WAVE: SHA3 Core Control
+# ======================================================================
+add wave -divider "--- Core Control ---"
+add wave                  /tb5_sha3_input/tb_dut_init
+add wave                  /tb5_sha3_input/tb_dut_next
+add wave                  /tb5_sha3_input/tb_rdy
+add wave -radix unsigned  /tb5_sha3_input/dut/round
+
+# ======================================================================
+# WAVE: Bus Ghi/Đọc
+# ======================================================================
+add wave -divider "--- Bus Write (TB -> RTL) ---"
+add wave                  /tb5_sha3_input/tb_we
+add wave -radix hex       /tb5_sha3_input/tb_addr
+add wave -radix hex       /tb5_sha3_input/tb_wr_data
+
+add wave -divider "--- Bus Read (RTL -> TB) ---"
+add wave -radix hex       /tb5_sha3_input/tb_rd_data
+
+# ======================================================================
+# WAVE: SHA3 Core Internal
+# ======================================================================
+add wave -divider "--- SHA3 Internal ---"
+add wave -radix hex       /tb5_sha3_input/dut/blk
+add wave -radix hex       /tb5_sha3_input/dut/st
+
+# ======================================================================
+# WAVE: Generator (sha3_bank)
+# ======================================================================
+add wave -divider "--- Generator (sha3_bank) ---"
+add wave -radix unsigned  /tb5_sha3_input/gen/raw_len
+add wave -radix unsigned  /tb5_sha3_input/gen/blk_bytes
+add wave -radix unsigned  /tb5_sha3_input/gen/pad_len
+add wave -radix unsigned  /tb5_sha3_input/gen/gen_block_words
+add wave -radix hex       /tb5_sha3_input/gen/gen_words
+
+# ======================================================================
+# WAVE: Kết quả Hash
+# ======================================================================
+add wave -divider "--- Hash Output ---"
+add wave -radix hex       /tb5_sha3_input/hash_shreg
+add wave -radix hex       /tb5_sha3_input/hash_word
+add wave -radix unsigned  /tb5_sha3_input/variant_int
+add wave -radix unsigned  /tb5_sha3_input/str_len
+
+# ---- Chạy ----
+run -all
+wave zoom full

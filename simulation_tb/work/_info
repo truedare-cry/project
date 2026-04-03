@@ -1,0 +1,52 @@
+m255
+K4
+z2
+13
+!s112 1.1
+!i10d 8192
+!i10e 25
+!i10f 100
+cModel Technology
+Z0 dD:/DATN/simulation_tb
+vsha3
+Z1 !s110 1775203897
+!i10b 1
+!s100 gEajoE]9bgNJCJA57nWzH0
+IGH@C]DM1M?e[;0SJB];kI2
+Z2 VDg1SIo80bB@j0V0VzS_@n1
+R0
+w1774254165
+8D:/DATN/sha3.v
+FD:/DATN/sha3.v
+L0 21
+Z3 OV;L;10.5b;63
+r1
+!s85 0
+31
+!s108 1775203896.000000
+!s107 D:/DATN/sha3.v|
+!s90 -reportprogress|300|-nolock|D:/DATN/sha3.v|
+!i113 1
+Z4 o-nolock
+Z5 tCvgOpt 0
+vtb2_sha3
+R1
+!i10b 1
+!s100 I6M3DFC>N75NOl17>8Koz1
+I;DY74dEocY^oI1?[QA9Mm2
+R2
+R0
+w1774261422
+8tb2_sha3.v
+Ftb2_sha3.v
+L0 30
+R3
+r1
+!s85 0
+31
+!s108 1775203897.000000
+!s107 tb2_sha3.v|
+!s90 -reportprogress|300|-nolock|tb2_sha3.v|
+!i113 1
+R4
+R5

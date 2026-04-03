@@ -1,0 +1,59 @@
+quit -sim
+if {[file exists work]} { vdel -all }
+vlib work
+
+# ---- Compile theo đúng thứ tự phụ thuộc ----
+# 1. SHA3 core (DUT)
+vlog -nolock D:/DATN/sha3.v
+vlog D:/DATN/sha3_bank.v
+vlog D:/DATN/tb4_sha3.v
+vsim work.tb4_sha3 -Lf 220model -Lf altera_mf_ver -Lf verilog
+
+# ======================================================================
+# WAVE: DUT signals
+# ======================================================================
+add wave -divider "--- Clock / Reset ---"
+add wave                    /tb4_sha3/tb_clk
+add wave                    /tb4_sha3/tb_rst_n
+
+add wave -divider "--- SHA3 Core Control ---"
+add wave                    /tb4_sha3/tb_dut_init
+add wave                    /tb4_sha3/tb_dut_next
+add wave                    /tb4_sha3/tb_rdy
+
+add wave -divider "--- SHA3 Core Bus ---"
+add wave                    /tb4_sha3/tb_we
+add wave -radix hex         /tb4_sha3/tb_addr
+add wave -radix hex         /tb4_sha3/tb_wr_data
+add wave -radix hex         /tb4_sha3/tb_rd_data
+
+add wave -divider "--- SHA3 Core Internal ---"
+add wave -radix hex         /tb4_sha3/dut/blk
+add wave -radix hex         /tb4_sha3/dut/st
+add wave -radix unsigned    /tb4_sha3/dut/round
+
+# ======================================================================
+# WAVE: sha3_input_gen signals
+# ======================================================================
+add wave -divider "--- Input Generator ---"
+add wave -radix unsigned    /tb4_sha3/gen/raw_len
+add wave -radix unsigned    /tb4_sha3/gen/pad_len
+add wave -radix unsigned    /tb4_sha3/gen/gen_block_words
+add wave -radix unsigned    /tb4_sha3/gen/gen_total_blocks
+add wave -radix unsigned    /tb4_sha3/gen/blk_bytes
+add wave -radix hex         /tb4_sha3/gen/gen_words
+
+# ======================================================================
+# WAVE: TB trạng thái
+# ======================================================================
+add wave -divider "--- TB State ---"
+add wave -radix unsigned    /tb4_sha3/block_words
+add wave -radix unsigned    /tb4_sha3/output_words
+add wave -radix unsigned    /tb4_sha3/num_err
+add wave                    /tb4_sha3/mismatch
+
+# ---- Chạy simulation ----
+run -all
+
+# ---- Zoom toàn bộ waveform ----
+wave zoom full

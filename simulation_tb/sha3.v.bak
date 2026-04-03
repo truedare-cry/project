@@ -1,0 +1,532 @@
+//=============================================================================
+// tb_sha3.v — SHA3 Testbench (Quartus / ModelSim compatible)
+//
+// Root-cause fixes in this version
+// ---------------------------------
+// BUG A (poll_rdy infinite loop):
+//   Original:  poll_rdy = ~tb_rdy;
+//   Problem:   ~1'bX == 1'bX  →  while(X) is ALWAYS true in Verilog 4-state
+//              logic → simulation hangs forever on the very first pump call.
+//   Fix:       poll_rdy = (tb_rdy !== 1'b1);
+//              Uses the "case-inequality" (identity) operator so X/Z on
+//              tb_rdy is treated as "not ready" and keeps waiting safely.
+//
+// BUG B (integer wi used as task-local but declared module-level):
+//   Original:  "integer wi" inside task body — illegal in Verilog-2001 tasks
+//              (only allowed in SystemVerilog automatic tasks).
+//   Fix:       wi removed from tasks; module-level "integer i" is reused.
+//
+// BUG C (write_block_word input width):
+//   Original:  input [5:0] widx  — truncates index 32..49 silently.
+//   Fix:       input integer widx (unconstrained) then slice inside.
+//
+// BUG D (test_long_message exit logic unreliable):
+//   Original:  while(!pad_started || total_bits > -32*block_words)
+//              Exit relied on "wi >= block_words-1" AFTER the for-loop,
+//              but "wi" ends at block_words, not block_words-1.
+//              Also -32*block_words with integer arithmetic can overflow on
+//              small negative values.
+//   Fix:       Replaced with explicit boolean "done" flag set inside the
+//              loop body when the last padding word is written.
+//
+// Other retained fixes from previous version
+// -------------------------------------------
+//  1. `define at file scope (not inside module)
+//  2. {N{1'bX}} padding -> {N{1'b0}} in localparams
+//  3. task-local reg declared at task header, not in named begin..end block
+//  4. tb_addr / tb_we always driven to known values after loops
+//  5. `ifndef SYNTHESIS guard around entire module
+//  6. Explicit clock initialisation to avoid X-propagation on startup
+//  7. Consistent CLK_PERIOD / CLK_HALF_PERIOD usage
+//=============================================================================
+
+//-----------------------------------------------------------------------------
+// All `define macros at FILE scope so they are visible to task arguments
+// in every Quartus / ModelSim version.
+//-----------------------------------------------------------------------------
+`define SHA3_224_BLOCK_BITS  1152
+`define SHA3_256_BLOCK_BITS  1088
+`define SHA3_384_BLOCK_BITS   832
+`define SHA3_512_BLOCK_BITS   576
+
+`define SHA3_224_OUTPUT_BITS  224
+`define SHA3_256_OUTPUT_BITS  256
+`define SHA3_384_OUTPUT_BITS  384
+`define SHA3_512_OUTPUT_BITS  512
+
+`ifndef SYNTHESIS
+
+module sha3 ();
+
+    // =========================================================================
+    // Known-good hash values
+    // Source (empty / short): https://www.di-mgt.com.au/sha_testvectors.html
+    // Source (long 0xA3x200): https://csrc.nist.gov/projects/cryptographic-
+    //                          standards-and-guidelines/example-values
+    //
+    // All localparams are 512 bits wide; unused low bits are zero-padded.
+    // (was X-padded in original — Quartus rejects X in constant expressions)
+    // =========================================================================
+
+    // -- Empty message --
+    localparam [511:0] SHA3_224_EMPTY_MSG = {
+        224'h6b4e03423667dbb73b6e15454f0eb1abd4597f9a1b078e3f5b5a6bc7,
+        {(512-224){1'b0}} };
+
+    localparam [511:0] SHA3_256_EMPTY_MSG = {
+        256'ha7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a,
+        {(512-256){1'b0}} };
+
+    localparam [511:0] SHA3_384_EMPTY_MSG = {
+        384'h0c63a75b845e4f7d01107d852e4c2485c51a50aaaa94fc61995e71bbee983a2ac3713831264adb47fb6bd1e058d5f004,
+        {(512-384){1'b0}} };
+
+    localparam [511:0] SHA3_512_EMPTY_MSG =
+        512'h00a69f73cca23a9ac5c8b567dc185a756e97c982164fe25859e0d1dcc1475c80a615b2123af1f5f94c11e3e9402c3ac558f500199d95b6d3e301758586281dcd26;
+
+    // -- Short message: "abc" (0x61 0x62 0x63) --
+    localparam [511:0] SHA3_224_SHORT_MSG = {
+        224'he642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf,
+        {(512-224){1'b0}} };
+
+    localparam [511:0] SHA3_256_SHORT_MSG = {
+        256'h3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532,
+        {(512-256){1'b0}} };
+
+    localparam [511:0] SHA3_384_SHORT_MSG = {
+        384'hec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b298d88cea927ac7f539f1edf228376d25,
+        {(512-384){1'b0}} };
+
+    localparam [511:0] SHA3_512_SHORT_MSG =
+        512'h00b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0;
+
+    // -- Long message: 200 x 0xA3 (1600 bits) --
+    localparam [511:0] SHA3_224_LONG_MSG = {
+        224'h9376816ABA503F72F96CE7EB65AC095DEEE3BE4BF9BBC2A1CB7E11E0,
+        {(512-224){1'b0}} };
+
+    localparam [511:0] SHA3_256_LONG_MSG = {
+        256'h79F38ADEC5C20307A98EF76E8324AFBFD46CFD81B22E3973C65FA1BD9DE31787,
+        {(512-256){1'b0}} };
+
+    localparam [511:0] SHA3_384_LONG_MSG = {
+        384'h1881DE2CA7E41EF95DC4732B8F5F002B189CC1E42B74168ED1732649CE1DBCDD76197A31FD55EE989F2D7050DD473E8F,
+        {(512-384){1'b0}} };
+
+    localparam [511:0] SHA3_512_LONG_MSG =
+        512'hE76DFAD22084A8B1467FCF2FFA58361BEC7628EDF5F3FDC0E4805DC48CAEECA81B7C13C30ADF52A3659584739A2DF46BE589C51CA1A4A8416DF6545A1CE8BA00;
+
+    // =========================================================================
+    // Timing
+    // =========================================================================
+    parameter CLK_HALF_PERIOD = 2;
+    parameter CLK_PERIOD      = 2 * CLK_HALF_PERIOD;
+
+    // =========================================================================
+    // Signals
+    //
+    // Expected DUT (sha3) port list:
+    //   clk    -- clock
+    //   nreset -- active-low reset
+    //   w      -- write enable for block-RAM input port
+    //   addr   -- 7-bit: addr[6]=0 -> write block word, addr[6]=1 -> read hash
+    //             addr[5:0] -> word index within block / hash (0..49)
+    //   din    -- 32-bit data in (big-endian byte order per this TB)
+    //   dout   -- 32-bit data out (hash word)
+    //   init   -- 1-cycle pulse: start / absorb first block
+    //   next   -- 1-cycle pulse: absorb subsequent block
+    //   ready  -- high when Keccak-f permutation is complete
+    // =========================================================================
+    reg          tb_clk;
+    reg          tb_rst_n;
+    reg          tb_we;
+    reg  [ 6:0]  tb_addr;
+    reg  [31:0]  tb_wr_data;
+    reg          tb_dut_init;
+    reg          tb_dut_next;
+    wire [31:0]  tb_rd_data;
+    wire         tb_rdy;
+
+    // Shared loop / state variables
+    integer      i;
+    integer      num_err;
+    integer      block_words;
+    integer      output_words;
+    integer      total_bits;
+
+    reg [511:0]  hash_shreg;
+    reg [ 31:0]  hash_word;
+    reg           mismatch;
+
+    // =========================================================================
+    // DUT instantiation
+    // =========================================================================
+    sha3 dut (
+        .clk    (tb_clk),
+        .nreset (tb_rst_n),
+        .w      (tb_we),
+        .addr   (tb_addr),
+        .din    (tb_wr_data),
+        .dout   (tb_rd_data),
+        .init   (tb_dut_init),
+        .next   (tb_dut_next),
+        .ready  (tb_rdy)
+    );
+
+    // =========================================================================
+    // Clock generator
+    // =========================================================================
+    initial tb_clk = 1'b0;
+    always  #CLK_HALF_PERIOD tb_clk = ~tb_clk;
+
+    // =========================================================================
+    // Task: init_sim
+    // =========================================================================
+    task init_sim;
+        begin
+            tb_clk      = 1'b0;
+            tb_rst_n    = 1'b0;
+            tb_we       = 1'b0;
+            tb_addr     = 7'd0;
+            tb_wr_data  = 32'h0000_0000;
+            tb_dut_init = 1'b0;
+            tb_dut_next = 1'b0;
+        end
+    endtask
+
+    // =========================================================================
+    // Task: reset_dut
+    // =========================================================================
+    task reset_dut;
+        begin
+            $display("*** Toggling reset...");
+            tb_rst_n = 1'b0;
+            #(4 * CLK_HALF_PERIOD);
+            tb_rst_n = 1'b1;
+            #(CLK_PERIOD);
+        end
+    endtask
+
+    // =========================================================================
+    // Task: write_block_word
+    //
+    // BUG C FIX: widx is integer (was [5:0]), preventing silent truncation
+    // of indices 32-49.
+    // =========================================================================
+    task write_block_word;
+        input integer widx;
+        input [31:0]  wdata;
+        begin
+            tb_addr    = {1'b0, widx[5:0]};
+            tb_wr_data = wdata;
+            tb_we      = 1'b1;
+            #(CLK_PERIOD);
+        end
+    endtask
+
+    // =========================================================================
+    // Task: sha3_sponge_pump_init
+    //
+    // BUG A FIX: poll_rdy = (tb_rdy !== 1'b1)
+    //   The !== operator performs a 4-state identity comparison:
+    //     1 !== 1  =>  0  (exit loop — DUT is ready)             OK
+    //     0 !== 1  =>  1  (continue polling — DUT still busy)    OK
+    //     X !== 1  =>  1  (continue polling — treat X as busy)   OK
+    //     Z !== 1  =>  1  (continue polling — treat Z as busy)   OK
+    //
+    //   The original "~tb_rdy":
+    //     ~1'b0 = 1'b1  (correct — DUT busy)
+    //     ~1'b1 = 1'b0  (correct — DUT ready)
+    //     ~1'bX = 1'bX  (WRONG — while(X) never exits in 4-state Verilog)
+    //
+    // BUG B FIX: poll_rdy declared at task header, not inside named block.
+    // =========================================================================
+    task sha3_sponge_pump_init;
+        reg poll_rdy;
+        begin
+            tb_we       = 1'b0;
+            tb_dut_init = 1'b1;
+            #(CLK_PERIOD);
+            tb_dut_init = 1'b0;
+
+            poll_rdy = 1'b1;
+            while (poll_rdy) begin
+                #(CLK_PERIOD);
+                poll_rdy = (tb_rdy !== 1'b1);   // <<< BUG A FIX
+            end
+        end
+    endtask
+
+    // =========================================================================
+    // Task: sha3_sponge_pump_next  (same fix as init version)
+    // =========================================================================
+    task sha3_sponge_pump_next;
+        reg poll_rdy;
+        begin
+            tb_we       = 1'b0;
+            tb_dut_next = 1'b1;
+            #(CLK_PERIOD);
+            tb_dut_next = 1'b0;
+
+            poll_rdy = 1'b1;
+            while (poll_rdy) begin
+                #(CLK_PERIOD);
+                poll_rdy = (tb_rdy !== 1'b1);   // <<< BUG A FIX
+            end
+        end
+    endtask
+
+    // =========================================================================
+    // Task: compare_output
+    // Shared read-and-compare logic used by all three test tasks.
+    // =========================================================================
+    task compare_output;
+        input [511:0] correct_hash;
+        begin
+            mismatch   = 1'b0;
+            hash_shreg = correct_hash;
+
+            for (i = 0; i < output_words; i = i + 1) begin
+                tb_addr = {1'b1, i[5:0]};   // addr[6]=1 => hash output RAM
+                tb_we   = 1'b0;
+                #(CLK_PERIOD);
+                hash_word = tb_rd_data;
+
+                $display("    word[%02d]  ref=%08h  got=%08h  %s",
+                    i,
+                    hash_shreg[511 -: 32],
+                    hash_word,
+                    (hash_shreg[511 -: 32] !== hash_word) ? "*** FAIL" : "ok");
+
+                if (hash_shreg[511 -: 32] !== hash_word) begin
+                    mismatch = 1'b1;
+                    num_err  = num_err + 1;
+                end
+                hash_shreg = {hash_shreg[479:0], {32{1'b0}}};
+            end
+
+            tb_addr = 7'd0;
+            tb_we   = 1'b0;
+
+            if (mismatch) $display("    *** FAILED\n");
+            else          $display("    *** PASSED\n");
+        end
+    endtask
+
+    // =========================================================================
+    // Task: test_empty_message
+    //
+    // SHA3 pad10*1 padding for empty message (big-endian word packing):
+    //   Word 0            : 32'h0600_0000  (0x06 domain byte in MSByte)
+    //   Word block_words-1: 32'h0000_0080  (0x80 final bit in LSByte)
+    //   All others        : 32'h0000_0000
+    // =========================================================================
+    task test_empty_message;
+        input [511:0] correct_hash;
+        input integer block_size;
+        input integer output_size;
+        begin
+            $display("*** Empty msg -- %0d-bit hash, %0d-bit block",
+                     output_size, block_size);
+
+            block_words  = block_size  >> 5;
+            output_words = output_size >> 5;
+
+            #(4 * CLK_PERIOD);
+
+            for (i = 0; i < 50; i = i + 1) begin
+                if (i == 0)
+                    write_block_word(i, 32'h0600_0000);
+                else if (i == block_words - 1)
+                    write_block_word(i, 32'h0000_0080);
+                else
+                    write_block_word(i, 32'h0000_0000);
+            end
+
+            tb_we   = 1'b0;
+            tb_addr = 7'd0;
+
+            sha3_sponge_pump_init();
+            compare_output(correct_hash);
+        end
+    endtask
+
+    // =========================================================================
+    // Task: test_short_message   ("abc" = 0x61 0x62 0x63)
+    //
+    // Word 0 (big-endian):
+    //   [31:24]=0x61  [23:16]=0x62  [15:8]=0x63  [7:0]=0x06
+    //   => 32'h6162_6306
+    // Word block_words-1: 32'h0000_0080
+    // =========================================================================
+    task test_short_message;
+        input [511:0] correct_hash;
+        input integer block_size;
+        input integer output_size;
+        begin
+            $display("*** Short msg (\"abc\") -- %0d-bit hash, %0d-bit block",
+                     output_size, block_size);
+
+            block_words  = block_size  >> 5;
+            output_words = output_size >> 5;
+
+            #(4 * CLK_PERIOD);
+
+            for (i = 0; i < 50; i = i + 1) begin
+                if (i == 0)
+                    write_block_word(i, 32'h6162_6306);
+                else if (i == block_words - 1)
+                    write_block_word(i, 32'h0000_0080);
+                else
+                    write_block_word(i, 32'h0000_0000);
+            end
+
+            tb_we   = 1'b0;
+            tb_addr = 7'd0;
+
+            sha3_sponge_pump_init();
+            compare_output(correct_hash);
+        end
+    endtask
+
+    // =========================================================================
+    // Task: test_long_message    (200 x 0xA3 = 1600 bits)
+    //
+    // BUG D FIX: replaced fragile while-arithmetic with explicit "done" flag.
+    //
+    // Algorithm:
+    //   Pass 1 (init): fill first block_words words with 0xA3A3_A3A3.
+    //   Pass 2+ (next): fill each subsequent block with remaining message data,
+    //     then padding once total_bits == 0.
+    //
+    // Padding rules (big-endian):
+    //   - When total_bits hits 0, the current word gets 0x06 in its MSByte.
+    //   - If that word is also the last word of the block => also OR 0x80
+    //     in LSByte => 32'h0600_0080, and we are done.
+    //   - Otherwise, zero-fill subsequent words; last word gets 0x0000_0080.
+    // =========================================================================
+    task test_long_message;
+        input [511:0] correct_hash;
+        input integer block_size;
+        input integer output_size;
+
+        // BUG D FIX: explicit done / pad_written flags
+        reg done;
+        reg pad_written;
+        begin
+            $display("*** Long msg (200x 0xA3) -- %0d-bit hash, %0d-bit block",
+                     output_size, block_size);
+
+            block_words  = block_size  >> 5;
+            output_words = output_size >> 5;
+
+            #(4 * CLK_PERIOD);
+
+            // --- First block (always fully filled with message data) ---
+            total_bits = 1600;
+
+            for (i = 0; i < 50; i = i + 1) begin
+                if (i < block_words) begin
+                    write_block_word(i, 32'hA3A3_A3A3);
+                    total_bits = total_bits - 32;
+                end else begin
+                    write_block_word(i, 32'h0000_0000);
+                end
+            end
+
+            tb_we   = 1'b0;
+            tb_addr = 7'd0;
+            sha3_sponge_pump_init();
+
+            // --- Subsequent blocks ---
+            done        = 1'b0;
+            pad_written = 1'b0;
+
+            while (!done) begin
+
+                for (i = 0; i < block_words; i = i + 1) begin
+
+                    if (total_bits > 0) begin
+                        // Message data
+                        write_block_word(i, 32'hA3A3_A3A3);
+                        total_bits = total_bits - 32;
+
+                    end else if (!pad_written) begin
+                        // First padding word: 0x06 domain byte
+                        if (i == block_words - 1) begin
+                            // Pad start + end fit in same word
+                            write_block_word(i, 32'h0600_0080);
+                            done = 1'b1;
+                        end else begin
+                            write_block_word(i, 32'h0600_0000);
+                        end
+                        pad_written = 1'b1;
+
+                    end else if (i == block_words - 1) begin
+                        // Last word of zero-fill region: place 0x80
+                        write_block_word(i, 32'h0000_0080);
+                        done = 1'b1;
+
+                    end else begin
+                        // Interior zero-fill
+                        write_block_word(i, 32'h0000_0000);
+                    end
+
+                end // for i
+
+                tb_we   = 1'b0;
+                tb_addr = 7'd0;
+                sha3_sponge_pump_next();
+
+            end // while !done
+
+            compare_output(correct_hash);
+        end
+    endtask
+
+    // =========================================================================
+    // Main stimulus
+    // =========================================================================
+    initial begin : sha3_test
+
+        $display("==============================================");
+        $display("  SHA3 Testbench  --  Quartus/ModelSim");
+        $display("==============================================\n");
+
+        num_err = 0;
+
+        init_sim();
+        reset_dut();
+
+        $display("--- Empty message ---");
+        test_empty_message(SHA3_224_EMPTY_MSG, `SHA3_224_BLOCK_BITS, `SHA3_224_OUTPUT_BITS);
+        test_empty_message(SHA3_256_EMPTY_MSG, `SHA3_256_BLOCK_BITS, `SHA3_256_OUTPUT_BITS);
+        test_empty_message(SHA3_384_EMPTY_MSG, `SHA3_384_BLOCK_BITS, `SHA3_384_OUTPUT_BITS);
+        test_empty_message(SHA3_512_EMPTY_MSG, `SHA3_512_BLOCK_BITS, `SHA3_512_OUTPUT_BITS);
+
+        $display("--- Short message: \"abc\" ---");
+        test_short_message(SHA3_224_SHORT_MSG, `SHA3_224_BLOCK_BITS, `SHA3_224_OUTPUT_BITS);
+        test_short_message(SHA3_256_SHORT_MSG, `SHA3_256_BLOCK_BITS, `SHA3_256_OUTPUT_BITS);
+        test_short_message(SHA3_384_SHORT_MSG, `SHA3_384_BLOCK_BITS, `SHA3_384_OUTPUT_BITS);
+        test_short_message(SHA3_512_SHORT_MSG, `SHA3_512_BLOCK_BITS, `SHA3_512_OUTPUT_BITS);
+
+        $display("--- Long message: 200 x 0xA3 ---");
+        test_long_message(SHA3_224_LONG_MSG, `SHA3_224_BLOCK_BITS, `SHA3_224_OUTPUT_BITS);
+        test_long_message(SHA3_256_LONG_MSG, `SHA3_256_BLOCK_BITS, `SHA3_256_OUTPUT_BITS);
+        test_long_message(SHA3_384_LONG_MSG, `SHA3_384_BLOCK_BITS, `SHA3_384_OUTPUT_BITS);
+        test_long_message(SHA3_512_LONG_MSG, `SHA3_512_BLOCK_BITS, `SHA3_512_OUTPUT_BITS);
+
+        $display("==============================================");
+        $display("  Testbench complete.");
+        if (num_err == 0)
+            $display("  ALL TESTS PASSED.");
+        else
+            $display("  %0d WORD(S) MISMATCHED.", num_err);
+        $display("==============================================");
+
+        $finish;
+    end
+
+endmodule // tb_sha3
+
+`endif // SYNTHESIS
